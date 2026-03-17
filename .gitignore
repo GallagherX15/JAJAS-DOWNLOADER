@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# PyInstaller folders
+build/
+dist/
+*.spec
+
+# Giant Binaries
+*.exe
+ffmpeg.exe
+ffprobe.exe
+*.zip
+log.txt
