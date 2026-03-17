@@ -2,6 +2,7 @@ import threading
 import sys
 import os
 import time
+import yt_dlp
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -243,7 +244,6 @@ def download(task: DownloadTask) -> None:
     }
 
     try:
-        import yt_dlp
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([task.video.url])
     except DownloadStopException:
@@ -292,7 +292,6 @@ def download_with_options(task: DownloadTask, quality_label: str, extension: str
     ydl_opts["progress_hooks"] = [master_hook]
 
     try:
-        import yt_dlp
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([task.video.url])
     except DownloadStopException:
