@@ -2,6 +2,7 @@ import os
 import threading
 import sys
 import tkinter as tk
+import re
 from io import BytesIO
 
 import customtkinter as ctk
@@ -159,8 +160,6 @@ class App(ctk.CTk):
         options_menu = tk.Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Opciones", menu=options_menu)
         options_menu.add_command(label="🔄 Actualizar motor (yt-dlp)", command=self.on_update_requested)
-        options_menu.add_separator()
-        options_menu.add_command(label="❌ Desinstalar App", command=self.on_uninstall_requested)
         options_menu.add_separator()
         options_menu.add_command(label="Salir", command=self.quit)
 
@@ -458,6 +457,7 @@ class App(ctk.CTk):
 
         self.download_btn.configure(state="disabled", text="Descargando...")
         self.analyze_btn.configure(state="disabled")
+        self.status_label.configure(text="Preparando descarga...")
 
         limit = SPEED_LIMITS.get(self.speed_limit_var.get())
         self.active_tasks = []
@@ -505,23 +505,34 @@ class App(ctk.CTk):
 
 
     def on_progress(self, d):
+        def strip_ansi(text):
+            if not text: return ""
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            return ansi_escape.sub('', str(text))
+
         if d['status'] == 'downloading':
             try:
-                # Cleanup ansi color codes from yt-dlp
-                percent_str = d.get('_percent_str', '0.0%').replace('\x1b[0;94m', '').replace('\x1b[0m', '')
-                speed_str = d.get('_speed_str', '--- b/s').replace('\x1b[0;92m', '').replace('\x1b[0m', '')
-                eta_str = d.get('_eta_str', '---').replace('\x1b[0;93m', '').replace('\x1b[0m', '')
+                # 1. Calculation based on raw bytes (more reliable)
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes') or d.get('total_bytes_estimate')
                 
-                pct = float(percent_str.replace('%','')) / 100.0
+                if total:
+                    pct = downloaded / total
+                    self.after(0, self.progress_bar.set, pct)
+                    self.after(0, self.pc_label.configure, {"text": f"{int(pct*100)}%"})
                 
-                self.after(0, self.progress_bar.set, pct)
-                self.after(0, self.pc_label.configure, {"text": f"{int(pct*100)}%"})
-                self.after(0, self.speed_label.configure, {"text": f"Velocidad: {speed_str.strip()}"})
-
-                self.after(0, self.eta_label.configure, {"text": f"ETA: {eta_str.strip()}"})
-                self.after(0, self.status_label.configure, {"text": f"Descargando ({self.completed_downloads}/{self.total_downloads}): {percent_str}"})
-            except Exception:
-                pass
+                # 2. Cleanup strings with regex
+                speed_str = strip_ansi(d.get('_speed_str', '--- b/s')).strip()
+                eta_str = strip_ansi(d.get('_eta_str', '---')).strip()
+                percent_str = strip_ansi(d.get('_percent_str', '0.0%')).strip()
+                
+                self.after(0, self.speed_label.configure, {"text": f"Velocidad: {speed_str}"})
+                self.after(0, self.eta_label.configure, {"text": f"ETA: {eta_str}"})
+                
+                status_txt = f"Descargando ({self.completed_downloads}/{self.total_downloads}): {percent_str}"
+                self.after(0, self.status_label.configure, {"text": status_txt})
+            except Exception as e:
+                print(f"Progress UI error: {e}")
         elif d['status'] == 'finished':
             self.after(0, self.status_label.configure, {"text": "Procesando archivo final..."})
 
@@ -529,7 +540,11 @@ class App(ctk.CTk):
         self.after(0, self._check_all_done)
 
     def _on_download_err(self, video, exc):
-        print(f"Failed {video.title}: {exc}")
+        err_msg = str(exc)
+        if "Download canceled" in err_msg:
+            self.after(0, lambda: self.status_label.configure(text="Descarga cancelada."))
+        else:
+            self.after(0, lambda: self.status_label.configure(text=f"Error en {video.title[:20]}: {err_msg[:40]}..."))
         self.after(0, self._check_all_done)
 
     def _check_all_done(self):
@@ -537,7 +552,8 @@ class App(ctk.CTk):
         if self.completed_downloads >= self.total_downloads:
             self.controls_frame.pack_forget()
             self.active_tasks = []
-            self.status_label.configure(text="¡Todas las descargas completadas!")
+            if "Error" not in self.status_label.cget("text"):
+                self.status_label.configure(text="¡Todas las descargas completadas!")
             self.progress_bar.set(1)
             self.pc_label.configure(text="100%")
             self.download_btn.configure(state="normal", text="Descargar")

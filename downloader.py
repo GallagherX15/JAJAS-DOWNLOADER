@@ -196,97 +196,63 @@ def fetch_formats(url: str) -> list[dict]:
 # Download engine
 # ---------------------------------------------------------------------------
 
-def download(task: DownloadTask) -> None:
-    """
-    Execute a download for the given DownloadTask.
-    Implements Stop, Pause, and Dynamic Throttling.
-    """
-    # Tracking for manual throttling
-    start_time = time.time()
-    
-    def master_hook(d):
-        # 1. STOP CHECK
-        if task.stop_event.is_set():
-            raise DownloadStopException("Download canceled by user")
-
-        # 2. PAUSE CHECK
-        while task.pause_event.is_set():
-            if task.stop_event.is_set():
-                raise DownloadStopException("Download canceled by user")
-            time.sleep(0.2)
-
-        # 3. DYNAMIC THROTTLING
-        # task.ratelimit can be changed anytime by main.py
-        if task.ratelimit and d.get('status') == 'downloading':
-            try:
-                downloaded = d.get('downloaded_bytes', 0)
-                elapsed = time.time() - start_time
-                if elapsed > 1: # Allow some ramp up
-                    target_time = downloaded / task.ratelimit
-                    if elapsed < target_time:
-                        time.sleep(target_time - elapsed)
-            except Exception:
-                pass
-
-        # 4. UI HOOK
-        task.progress_hook(d)
-
-    ydl_opts = {
-        "format": task.format_string,
-        "outtmpl": f"{task.output_path}/%(title)s.%(ext)s",
-        "progress_hooks": [master_hook],
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": None,
-        "postprocessors": [],
-        "ffmpeg_location": get_ffmpeg_path(),
-        "ratelimit": task.ratelimit,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([task.video.url])
-    except DownloadStopException:
-        pass # Handle gracefully
-    except Exception as e:
-        raise e
-
-
 def download_with_options(task: DownloadTask, quality_label: str, extension: str) -> None:
     """
-    High-level download helper that wires everything together.
-    Now uses the DownloadTask to support controls.
+    High-level download helper with Stop, Pause, and Throttling logic.
     """
     task.format_string = build_format_string(quality_label)
     pps = build_postprocessors(quality_label, extension.lower())
 
-    # We reuse 'download' which already has the control logic
-    # But we need to inject postprocessors here
     ydl_opts = {
         "format": task.format_string,
         "outtmpl": f"{task.output_path}/%(title)s.%(ext)s",
-        "progress_hooks": [], # We will wrap in download() if needed, but for simplicity:
         "quiet": True,
         "no_warnings": True,
         "postprocessors": pps,
         "keepvideo": False,
         "ffmpeg_location": get_ffmpeg_path(),
-        "ratelimit": task.ratelimit,
+        "nocheckcertificate": True, # For reliability
     }
 
-    # Internal wrapper for controls inside this specific flow
-    start_time = time.time()
+    # Throttling state: tracks window-based delta
+    state = {
+        'last_bytes': 0,
+        'last_time': time.time()
+    }
+
     def master_hook(d):
-        if task.stop_event.is_set(): raise DownloadStopException()
+        # 1. STOP
+        if task.stop_event.is_set():
+            raise DownloadStopException("Download canceled by user")
+
+        # 2. PAUSE
         while task.pause_event.is_set():
-            if task.stop_event.is_set(): raise DownloadStopException()
+            if task.stop_event.is_set():
+                raise DownloadStopException("Download canceled by user")
             time.sleep(0.2)
+        
+        # 3. THROTTLING (Delta-based to allow dynamic updates)
         if task.ratelimit and d.get('status') == 'downloading':
             try:
-                target = d.get('downloaded_bytes', 0) / task.ratelimit
-                elapsed = time.time() - start_time
-                if elapsed < target: time.sleep(target - elapsed)
-            except: pass
+                now = time.time()
+                current_bytes = d.get('downloaded_bytes', 0)
+                delta_bytes = current_bytes - state['last_bytes']
+                delta_time = now - state['last_time']
+                
+                if delta_time < 0.1: # Protect against division by zero or too frequent hooks
+                    return 
+
+                # Target time for this delta
+                target_delta_time = delta_bytes / task.ratelimit
+                if delta_time < target_delta_time:
+                    time.sleep(target_delta_time - delta_time)
+                
+                state['last_bytes'] = current_bytes
+                state['last_time'] = time.time()
+            except:
+                pass
+
+        # 4. SEND TO UI
         task.progress_hook(d)
 
     ydl_opts["progress_hooks"] = [master_hook]
@@ -296,6 +262,8 @@ def download_with_options(task: DownloadTask, quality_label: str, extension: str
             ydl.download([task.video.url])
     except DownloadStopException:
         pass
+    except Exception as e:
+        raise e
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +306,7 @@ def download_async(
     def _run():
         try:
             download_with_options(task, quality_label, extension)
+            # Only trigger on_done if we weren't stopped
             if not task.stop_event.is_set():
                 on_done(video)
         except Exception as exc:
